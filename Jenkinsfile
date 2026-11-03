@@ -1,73 +1,167 @@
 
-stage('Deploy to EC2') {
-    steps {
-        echo 'Deploying Flask application with rollback protection'
+pipeline {
+    agent any
 
-        sh '''
-            set -e
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+    }
 
-            NEW_IMAGE="${IMAGE_NAME}:${BUILD_NUMBER}"
+    environment {
+        IMAGE_NAME = 'sanjai1412/flask-cicd-app'
+    }
 
-            # Save the currently running version's immutable image ID
-            PREVIOUS_IMAGE_ID=$(docker inspect \
-                --format='{{.Image}}' flask-cicd-app 2>/dev/null || true)
+    stages {
 
-            echo "Previous image: ${PREVIOUS_IMAGE_ID}"
-            echo "New image: ${NEW_IMAGE}"
+        stage('Checkout') {
+            steps {
+                echo 'Checking out Flask application'
+                checkout scm
+            }
+        }
 
-            docker pull "$NEW_IMAGE"
+        stage('Build') {
+            steps {
+                echo 'Checking Python application syntax'
+                sh '''
+                    /opt/flask-ci/venv/bin/python -m compileall -q .
+                '''
+            }
+        }
 
-            # Stop the old application
-            docker rm -f flask-cicd-app || true
+        stage('Test') {
+            steps {
+                echo 'Running Flask tests'
+                sh '''
+                    /opt/flask-ci/venv/bin/pytest -v -p no:cacheprovider
+                '''
+            }
+        }
 
-            # Start the new version
-            docker run -d \
-                --name flask-cicd-app \
-                --restart unless-stopped \
-                -p 5000:5000 \
-                "$NEW_IMAGE"
+        stage('Docker Build') {
+            steps {
+                echo 'Building Docker image'
+                sh '''
+                    docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} .
+                    docker tag ${IMAGE_NAME}:${BUILD_NUMBER} ${IMAGE_NAME}:latest
+                '''
+            }
+        }
 
-            # Check application health
-            HEALTHY=false
+        stage('Docker Push') {
+            steps {
+                echo 'Pushing image to Docker Hub'
 
-            for i in $(seq 1 10); do
-                if curl --fail --silent http://localhost:5000/health; then
-                    HEALTHY=true
-                    break
-                fi
-                echo "Health check attempt $i failed. Retrying..."
-                sleep 3
-            done
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-creds',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+                        echo "$DOCKER_PASS" | tr -d '\\r\\n' | docker login \
+                            -u "$DOCKER_USER" \
+                            --password-stdin
 
-            if [ "$HEALTHY" = "true" ]; then
-                echo "New deployment is healthy!"
-            else
-                echo "New deployment failed. Starting rollback..."
+                        docker push ${IMAGE_NAME}:${BUILD_NUMBER}
+                        docker push ${IMAGE_NAME}:latest
 
-                docker rm -f flask-cicd-app || true
+                        docker logout
+                    '''
+                }
+            }
+        }
 
-                if [ -n "$PREVIOUS_IMAGE_ID" ]; then
-                    docker run -d \
+        stage('Deploy to EC2') {
+            steps {
+                echo 'Deploying Flask application with rollback protection'
+
+                sh '''
+                    set -eu
+
+                    NEW_IMAGE="${IMAGE_NAME}:${BUILD_NUMBER}"
+
+                    PREVIOUS_IMAGE_ID=$(docker inspect \
+                        --format='{{.Image}}' flask-cicd-app 2>/dev/null || true)
+
+                    echo "Previous image: ${PREVIOUS_IMAGE_ID}"
+                    echo "New image: ${NEW_IMAGE}"
+
+                    docker pull "$NEW_IMAGE"
+
+                    rollback() {
+                        echo "Deployment failed. Starting rollback..."
+
+                        docker rm -f flask-cicd-app || true
+
+                        if [ -z "$PREVIOUS_IMAGE_ID" ]; then
+                            echo "No previous image available!"
+                            return 1
+                        fi
+
+                        docker run -d \
+                            --name flask-cicd-app \
+                            --restart unless-stopped \
+                            -p 5000:5000 \
+                            "$PREVIOUS_IMAGE_ID"
+
+                        for i in $(seq 1 10); do
+                            if curl --fail --silent http://localhost:5000/health; then
+                                echo "ROLLBACK SUCCESSFUL: Previous version restored."
+                                return 0
+                            fi
+                            sleep 3
+                        done
+
+                        echo "ROLLBACK FAILED: Previous version is unhealthy."
+                        return 1
+                    }
+
+                    docker rm -f flask-cicd-app || true
+
+                    if ! docker run -d \
                         --name flask-cicd-app \
                         --restart unless-stopped \
                         -p 5000:5000 \
-                        "$PREVIOUS_IMAGE_ID"
+                        "$NEW_IMAGE"; then
 
-                    sleep 5
-
-                    if curl --fail http://localhost:5000/health; then
-                        echo "ROLLBACK SUCCESSFUL: Previous version restored."
-                    else
-                        echo "ROLLBACK FAILED: Previous version is unhealthy."
+                        rollback
                         exit 1
                     fi
-                else
-                    echo "No previous image available for rollback."
-                    exit 1
-                fi
 
-                exit 1
-            fi
-        '''
+                    HEALTHY=false
+
+                    for i in $(seq 1 10); do
+                        if curl --fail --silent http://localhost:5000/health; then
+                            HEALTHY=true
+                            break
+                        fi
+
+                        echo "Health check attempt $i failed."
+                        sleep 3
+                    done
+
+                    if [ "$HEALTHY" = "true" ]; then
+                        echo "New deployment is healthy!"
+                    else
+                        rollback
+                        exit 1
+                    fi
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'CI/CD PIPELINE COMPLETED SUCCESSFULLY!'
+        }
+
+        failure {
+            echo 'CI/CD PIPELINE FAILED. Check Console Output.'
+        }
     }
 }
+     
