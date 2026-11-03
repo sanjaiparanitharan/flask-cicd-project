@@ -134,7 +134,7 @@ pipeline {
                     HEALTHY=false
 
                     for i in $(seq 1 10); do
-                        if curl --fail --silent http://localhost:5000/health; then
+                        if curl --fail --silent http://localhost:5000/health-fail-demo; then
                             HEALTHY=true
                             break
                         fi
