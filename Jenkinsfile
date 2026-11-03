@@ -1,13 +1,17 @@
 pipeline {
     agent any
 
+    options {
+        skipDefaultCheckout(true)
+    }
+
     environment {
         IMAGE_NAME = 'sanjai1412/flask-cicd-app'
     }
 
     stages {
 
-        // Stage 1: Get source code from GitHub
+        // Stage 1: Checkout source code
         stage('Checkout') {
             steps {
                 echo 'Checking out Flask application from GitHub'
@@ -15,17 +19,13 @@ pipeline {
             }
         }
 
-        // Stage 2: Run application tests
+        // Stage 2: Run Flask application tests
         stage('Test') {
             steps {
                 echo 'Running Flask application tests'
 
                 sh '''
-                    docker run --rm \
-                    -v "$WORKSPACE:/app" \
-                    -w /app \
-                    python:3.12-slim \
-                    sh -c "pip install --no-cache-dir -r requirements.txt && pytest -v"
+                    /opt/flask-ci/venv/bin/pytest -v
                 '''
             }
         }
@@ -56,14 +56,13 @@ pipeline {
                 ]) {
                     sh '''
                         set +x
+                        trap 'docker logout >/dev/null 2>&1 || true' EXIT
 
                         echo "$DOCKER_PASS" | docker login \
-                        -u "$DOCKER_USER" --password-stdin
+                            -u "$DOCKER_USER" --password-stdin
 
                         docker push ${IMAGE_NAME}:${BUILD_NUMBER}
                         docker push ${IMAGE_NAME}:latest
-
-                        docker logout
                     '''
                 }
             }
@@ -72,13 +71,13 @@ pipeline {
 
     post {
         success {
-            echo '================================'
-            echo 'CI/CD Pipeline completed successfully!'
-            echo '================================'
+            echo '======================================'
+            echo 'CI/CD PIPELINE COMPLETED SUCCESSFULLY!'
+            echo '======================================'
         }
 
         failure {
-            echo 'Pipeline failed. Please check Console Output.'
+            echo 'CI/CD Pipeline failed. Check Console Output.'
         }
     }
 }
